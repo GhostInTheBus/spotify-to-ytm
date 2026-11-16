@@ -4,7 +4,7 @@ Your friends keep sending Spotify links. You don't have Spotify.
 
 Spotify to YTM is a tiny macOS menu bar app that watches your clipboard. Copy a Spotify link and it quietly swaps it for the matching YouTube Music link, so you just paste and play.
 
-[Watch the 16 second explainer](media/spotify-to-ytm.mp4)
+https://github.com/user-attachments/assets/37496397-ef69-42ff-a63c-937a0fc4a0db
 
 ## What it does
 
