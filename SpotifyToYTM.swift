@@ -19,6 +19,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     let kAutoOpen = "autoOpenBrowser"
     let kNotify = "showNotifications"
     let kHistory = "conversionHistory"
+    let kReverse = "reverseMode"
+
+    // false: Spotify links become YouTube Music links. true: YouTube links become Spotify links.
+    var reverseMode: Bool {
+        get { defaults.object(forKey: kReverse) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: kReverse); rebuildMenu() }
+    }
 
     var isEnabled: Bool {
         get { defaults.object(forKey: kEnabled) as? Bool ?? true }
@@ -55,6 +62,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         options: [.caseInsensitive]
     )
 
+    // youtube.com/watch?v=, music.youtube.com/watch?v=, youtu.be/ID, youtube.com/shorts/ID, playlist?list=
+    let youtubeRegex = try! NSRegularExpression(
+        pattern: #"https?://(?:(?:www\.|m\.|music\.)?youtube\.com/(?:watch\?[^\s]*v=[A-Za-z0-9_-]{11}|shorts/[A-Za-z0-9_-]{11}|playlist\?[^\s]*list=[A-Za-z0-9_-]+)|youtu\.be/[A-Za-z0-9_-]{11})[^\s]*"#,
+        options: [.caseInsensitive]
+    )
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
@@ -85,9 +98,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func rebuildMenu() {
         let menu = NSMenu()
 
-        let headerItem = NSMenuItem(title: "Spotify → YouTube Music", action: nil, keyEquivalent: "")
+        let headerItem = NSMenuItem(title: reverseMode ? "YouTube → Spotify" : "Spotify → YouTube Music", action: nil, keyEquivalent: "")
         headerItem.isEnabled = false
         menu.addItem(headerItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let fwdItem = NSMenuItem(title: "Spotify Links → YouTube Music", action: #selector(setForward), keyEquivalent: "")
+        fwdItem.target = self
+        fwdItem.state = reverseMode ? .off : .on
+        menu.addItem(fwdItem)
+
+        let revItem = NSMenuItem(title: "YouTube Links → Spotify", action: #selector(setReverse), keyEquivalent: "r")
+        revItem.target = self
+        revItem.state = reverseMode ? .on : .off
+        menu.addItem(revItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let enableItem = NSMenuItem(title: "Auto-Convert on Copy", action: #selector(toggleEnabled), keyEquivalent: "e")
@@ -143,6 +168,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         statusItem.menu = menu
     }
 
+    @objc func setForward() { reverseMode = false }
+    @objc func setReverse() { reverseMode = true }
     @objc func toggleEnabled() { isEnabled.toggle() }
     @objc func toggleNotify() { showNotifications.toggle() }
     @objc func toggleAutoOpen() { autoOpenBrowser.toggle() }
@@ -166,7 +193,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         } else {
             writeToPasteboard(item.ytmURL)
             if showNotifications {
-                sendNotification(title: "Copied YouTube Music Link", subtitle: item.title, body: item.ytmURL)
+                sendNotification(title: "Copied Link", subtitle: item.title, body: item.ytmURL)
             }
         }
     }
@@ -187,17 +214,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         if !force && text == lastWrittenURL { return }
 
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = spotifyRegex.firstMatch(in: text, options: [], range: nsRange),
+        let reverse = reverseMode
+        let regex = reverse ? youtubeRegex : spotifyRegex
+        guard let match = regex.firstMatch(in: text, options: [], range: nsRange),
               let matchRange = Range(match.range, in: text) else {
             return
         }
 
+        // Source link (Spotify, or YouTube in reverse mode); the names below are kept from v1.
         let spotifyURL = String(text[matchRange])
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                let (ytmURL, displayTitle) = try self.convertSpotifyURL(spotifyURL)
+                let (ytmURL, displayTitle) = reverse
+                    ? try self.convertYouTubeURL(spotifyURL)
+                    : try self.convertSpotifyURL(spotifyURL)
                 DispatchQueue.main.async {
                     // Replace the Spotify URL inside the copied text (supports full message text or bare URL)
                     let updatedText = text.replacingOccurrences(of: spotifyURL, with: ytmURL)
@@ -214,7 +246,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
                     if self.showNotifications {
                         self.sendNotification(
-                            title: "Converted to YouTube Music",
+                            title: reverse ? "Converted to Spotify" : "Converted to YouTube Music",
                             subtitle: displayTitle,
                             body: ytmURL
                         )
@@ -377,6 +409,60 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         throw NSError(domain: "SpotifyToYTM", code: 3, userInfo: [NSLocalizedDescriptionKey: "No match found on YouTube Music"])
+    }
+
+    // MARK: - Reverse: YouTube -> Spotify
+
+    // Spotify's Web API now needs a paid Premium developer account, so this reads the song
+    // name from YouTube's public oEmbed endpoint and builds a Spotify search link instead.
+    func convertYouTubeURL(_ urlString: String) throws -> (String, String) {
+        var comps = URLComponents(string: "https://www.youtube.com/oembed")!
+        comps.queryItems = [URLQueryItem(name: "url", value: urlString), URLQueryItem(name: "format", value: "json")]
+        var req = URLRequest(url: comps.url!, timeoutInterval: 8.0)
+        req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+
+        let sem = DispatchSemaphore(value: 0)
+        var body = Data()
+        var fetchErr: Error?
+        URLSession.shared.dataTask(with: req) { data, _, err in
+            fetchErr = err
+            body = data ?? Data()
+            sem.signal()
+        }.resume()
+        sem.wait()
+        if let fetchErr = fetchErr { throw fetchErr }
+
+        guard let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let rawTitle = obj["title"] as? String, !rawTitle.isEmpty else {
+            throw NSError(domain: "SpotifyToYTM", code: 4, userInfo: [NSLocalizedDescriptionKey: "Could not read YouTube title"])
+        }
+        let author = (obj["author_name"] as? String) ?? ""
+        let query = Self.songQuery(title: rawTitle, author: author)
+
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#")
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
+        return ("https://open.spotify.com/search/\(encoded)", query)
+    }
+
+    // Turns a YouTube title and channel into "song artist" for a Spotify search.
+    static func songQuery(title: String, author: String) -> String {
+        var t = title
+        // Drop video noise like (Official Video), [Lyrics], (HD), (Audio) etc.
+        t = t.replacingOccurrences(of: #"\s*[\(\[][^\)\]]*(official|video|audio|lyric|visuali[sz]er|hd|4k|remaster(ed)?|mv)[^\)\]]*[\)\]]"#,
+                                   with: "", options: [.regularExpression, .caseInsensitive])
+        t = t.replacingOccurrences(of: #"\s*\|.*$"#, with: "", options: .regularExpression)
+        var a = author
+        a = a.replacingOccurrences(of: #"\s*-\s*Topic$"#, with: "", options: .regularExpression)
+        a = a.replacingOccurrences(of: #"VEVO$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        a = a.replacingOccurrences(of: #"\s*(Official)?\s*$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        a = a.trimmingCharacters(in: .whitespacesAndNewlines)
+        // "Artist - Song" titles already carry the artist.
+        if t.contains(" - ") || a.isEmpty || t.lowercased().contains(a.lowercased()) {
+            return t.replacingOccurrences(of: " - ", with: " ")
+        }
+        return "\(t) \(a)"
     }
 
     func extractRegex(_ pattern: String, from text: String) -> String? {

@@ -19,6 +19,10 @@ SPOTIFY_REGEX = re.compile(
     r"^https?://(?:open\.spotify\.com/(?:intl-[a-zA-Z-]+/)?(?P<type>track|album|artist|playlist)/(?P<id>[a-zA-Z0-9]+)|spotify\.link/[a-zA-Z0-9]+)(?:\?[^\s]*)?$"
 )
 
+YOUTUBE_REGEX = re.compile(
+    r"https?://(?:(?:www\.|m\.|music\.)?youtube\.com/(?:watch\?\S*v=[A-Za-z0-9_-]{11}|shorts/[A-Za-z0-9_-]{11}|playlist\?\S*list=[A-Za-z0-9_-]+)|youtu\.be/[A-Za-z0-9_-]{11})\S*"
+)
+
 USER_AGENT = "Mozilla/5.0"
 
 
@@ -153,16 +157,56 @@ def convert_spotify_url(url: str) -> tuple[str, str, str]:
     return ytm_url, display_sub, item_type
 
 
+def song_query(title: str, author: str) -> str:
+    """Turns a YouTube title and channel into 'song artist' for a Spotify search."""
+    t = re.sub(
+        r"\s*[\(\[][^\)\]]*(official|video|audio|lyric|visuali[sz]er|hd|4k|remaster(ed)?|mv)[^\)\]]*[\)\]]",
+        "", title, flags=re.I,
+    )
+    t = re.sub(r"\s*\|.*$", "", t).strip()
+    a = re.sub(r"\s*-\s*Topic$", "", author)
+    a = re.sub(r"VEVO$", "", a, flags=re.I)
+    a = re.sub(r"\s*(Official)?\s*$", "", a, flags=re.I).strip()
+    if " - " in t or not a or a.lower() in t.lower():
+        return t.replace(" - ", " ")
+    return f"{t} {a}"
+
+
+def convert_youtube_url(url: str) -> tuple[str, str]:
+    """YouTube -> Spotify. Spotify's Web API now needs a paid Premium developer
+    account, so this reads the song name from YouTube's public oEmbed endpoint and
+    returns a Spotify search link."""
+    api = "https://www.youtube.com/oembed?" + urllib.parse.urlencode({"url": url, "format": "json"})
+    req = urllib.request.Request(api, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    query = song_query(data.get("title", ""), data.get("author_name", ""))
+    if not query:
+        raise ValueError("Could not read YouTube title")
+    return "https://open.spotify.com/search/" + urllib.parse.quote(query, safe=""), query
+
+
 def main() -> None:
-    if "--test" in sys.argv and len(sys.argv) > 2:
-        test_url = sys.argv[2]
+    reverse = "--reverse" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--reverse"]
+
+    if args[:1] == ["--test"] and len(args) > 1:
+        test_url = args[1]
+        if reverse:
+            sp_url, query = convert_youtube_url(test_url)
+            print(f"Matched: {query}")
+            print(f"Spotify URL: {sp_url}")
+            return
         ytm_url, display_sub, item_type = convert_spotify_url(test_url)
         print(f"Type: {item_type}")
         print(f"Matched: {display_sub}")
         print(f"YouTube Music URL: {ytm_url}")
         return
 
-    print("Starting Spotify -> YouTube Music clipboard watcher...")
+    if reverse:
+        print("Starting YouTube -> Spotify clipboard watcher...")
+    else:
+        print("Starting Spotify -> YouTube Music clipboard watcher...")
     last_clip = get_clipboard()
 
     while True:
@@ -170,7 +214,15 @@ def main() -> None:
             clip = get_clipboard()
             if clip and clip != last_clip:
                 last_clip = clip
-                match = SPOTIFY_REGEX.match(clip)
+                if reverse and YOUTUBE_REGEX.match(clip):
+                    print(f"Detected YouTube link: {clip}")
+                    sp_url, query = convert_youtube_url(clip)
+                    set_clipboard(sp_url)
+                    last_clip = sp_url
+                    notify("Converted to Spotify", query, sp_url)
+                    print(f"Replaced clipboard with: {sp_url}")
+                    continue
+                match = None if reverse else SPOTIFY_REGEX.match(clip)
                 if match:
                     print(f"Detected Spotify link: {clip}")
                     ytm_url, display_sub, _ = convert_spotify_url(clip)

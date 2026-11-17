@@ -4,11 +4,14 @@ Your friends keep sending Spotify links. You don't have Spotify.
 
 Spotify to YTM is a tiny macOS menu bar app that watches your clipboard. Copy a Spotify link and it quietly swaps it for the matching YouTube Music link, so you just paste and play.
 
+New in v2: flip a switch in the menu and it works the other way. Copy a YouTube link and it turns into a Spotify link for your friends who live on Spotify.
+
 https://github.com/user-attachments/assets/37496397-ef69-42ff-a63c-937a0fc4a0db
 
 ## What it does
 
 - Works with tracks, albums, artists and playlists, plus `spotify.link` short links
+- Flip it: "YouTube Links → Spotify" in the menu turns YouTube and YouTube Music links (videos, shorts, playlists, youtu.be) into Spotify links
 - If you copy a whole message with a link in it, only the link gets swapped
 - Menu bar toggles: Auto-Convert on Copy, Show Notification Banner, Auto-Open in Browser
 - "Convert Current Clipboard Now" for a manual run
@@ -34,6 +37,14 @@ That builds `/Applications/Spotify to YTM.app` and adds a LaunchAgent so it star
 
 No accounts, no API keys, no logins.
 
+### The other way (YouTube to Spotify)
+
+1. Read: it asks YouTube's public oEmbed endpoint for the video's title and channel.
+2. Clean: it drops stuff like "(Official Video)" and " - Topic" so you get song plus artist.
+3. Link: it builds an `open.spotify.com/search/...` link, which opens Spotify with that song at the top.
+
+Why a search link and not the exact track? Spotify's Web API now needs the developer to pay for Premium, and this app stays free with no keys. The search link gets your friend to the song in one tap.
+
 ## Do I need YouTube Music Premium?
 
 No. The links open on the free, ad supported tier of YouTube Music. On phones, playing in the background needs Premium.
@@ -49,6 +60,7 @@ Everything runs on your Mac. The only things sent anywhere are the Spotify link 
 ```sh
 python3 spotify_to_ytm.py            # watch the clipboard
 python3 spotify_to_ytm.py --test URL # convert one link and print it
+python3 spotify_to_ytm.py --reverse  # YouTube links to Spotify instead
 ```
 
 ## Uninstall
